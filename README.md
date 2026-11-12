@@ -1,4 +1,6 @@
-# Template de API RESTful (FastAPI + SQLite) - Monolito (Projeto A3)
+# Template de API RESTful (FastAPI + SQLite) - Multicamadas (Projeto A4)
+
+> ✅ **Branch `multicamadas`:** o monolito foi refatorado em camadas. Veja **[MUDANCAS.md](MUDANCAS.md)** para o que foi feito e como executar (`uv sync` e `uv run uvicorn app.main:app --reload`).
 
 > 💡 **AVISO IMPORTANTE:** Este repositório contém a estrutura base desenvolvida para o **Projeto A3** em formato **monolítico**. Todo o ciclo de vida da aplicação — conexão com o banco, estruturação de dados e roteamento — está concentrado em um único arquivo (`main.py`). Ao final deste documento, há um guia prático de como evoluir esta base para o **Projeto A4**, adotando uma arquitetura em múltiplas camadas.
 
