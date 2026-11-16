@@ -1,4 +1,108 @@
-# Template de API RESTful (FastAPI + SQLite) - Multicamadas (Projeto A4)
+# Template de API RESTful (FastAPI + SQLite) - Multicamadas + Nginx (Projeto A4)
+
+> 🔀 **Branch `nginx`:** continuação da branch `multicamadas`. Aqui a API passa a ficar **atrás de um proxy reverso Nginx**. O mini tutorial está logo abaixo.
+
+**Integrantes:** _(preencher com o nome de todos os componentes)_
+
+## 🧭 Mini tutorial: Nginx como proxy reverso da API
+
+### Arquitetura
+
+```
+Cliente ──► Nginx :8080 ──► Uvicorn/FastAPI :8000 (interno) ──► SQLite
+           (rate limit,         (rotas → serviço → repositório)
+            headers, logs)
+```
+
+O cliente **nunca** acessa o Uvicorn diretamente: a porta 8000 só existe na rede interna; o único ponto de entrada é o Nginx.
+
+### Arquivos adicionados nesta branch
+
+| Arquivo | Função |
+|---|---|
+| `nginx/nginx.conf` | Configuração do proxy reverso (usada no Docker) |
+| `nginx/nginx.local.conf` | Mesma configuração apontando para `127.0.0.1:8000` (sem Docker) |
+| `Dockerfile` | Imagem da API (Python 3.12 + uv + Uvicorn com `--proxy-headers`) |
+| `docker-compose.yml` | Sobe os serviços `api` (interno) e `nginx` (porta 8080) |
+| `app/core/database.py` | Caminho do banco agora vem da variável `DB_PATH` (volume no Docker) |
+
+### O que a configuração do Nginx faz
+
+```nginx
+limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;  # rate limiting por IP
+limit_req_status 429;
+
+upstream api_backend { server api:8000; }   # mais instâncias aqui = load balancing
+
+server {
+    listen 80;
+    server_tokens off;          # esconde a versão do Nginx
+    client_max_body_size 1m;    # bloqueia corpos gigantes
+
+    location / {
+        limit_req zone=api_limit burst=20 nodelay;
+        proxy_pass http://api_backend;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+- **Ocultação/isolamento:** `proxy_pass` encaminha tudo para o Uvicorn interno.
+- **Segurança:** rate limiting (10 req/s por IP, rajada de 20; excedentes recebem `429`), limite de corpo, versão oculta e headers `X-Content-Type-Options`, `X-Frame-Options` e `Referrer-Policy`.
+- **Cabeçalhos `X-Forwarded-*`:** o Uvicorn roda com `--proxy-headers`, então a API enxerga o IP e o protocolo reais do cliente (doc do FastAPI *Behind a Proxy*).
+
+### Opção A — Docker Compose (recomendado)
+
+```bash
+docker compose up -d --build
+```
+
+- API via Nginx: http://localhost:8080/registros
+- Swagger: http://localhost:8080/docs
+- Health do Nginx: http://localhost:8080/nginx-health
+- `http://localhost:8000` **não responde** — a API não é exposta ao host.
+
+Para parar: `docker compose down`.
+
+### Opção B — Sem Docker (Nginx instalado na máquina)
+
+1. Instale o Nginx (`sudo apt install nginx` no Ubuntu/WSL, `brew install nginx` no macOS).
+2. Suba a API só na interface local:
+   ```bash
+   uv sync
+   uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers
+   ```
+3. Copie a configuração e recarregue o Nginx:
+   ```bash
+   sudo cp nginx/nginx.local.conf /etc/nginx/conf.d/api.conf
+   sudo nginx -t && sudo nginx -s reload   # ou: sudo systemctl reload nginx
+   ```
+4. Acesse http://localhost:8080/docs.
+
+### Testando
+
+```bash
+# CRUD passando pelo Nginx
+curl -X POST http://localhost:8080/registros -H "Content-Type: application/json" -d '{"titulo":"teste"}'
+curl -i http://localhost:8080/registros      # repare em "Server: nginx" e X-Frame-Options
+
+# Rate limiting: 40 requisições seguidas
+for i in $(seq 1 40); do curl -s -o /dev/null -w "%{http_code} " http://localhost:8080/registros; done
+```
+
+Resultado esperado: ~21 respostas `200` e o restante `429 Too Many Requests`.
+
+### Referências
+
+- [NGINX Reverse Proxy Guide](https://docs.nginx.com/nginx/admin-guide/web-server/reverse-proxy/)
+- [FastAPI – Behind a Proxy](https://fastapi.tiangolo.com/advanced/behind-a-proxy/) / [Server Workers](https://fastapi.tiangolo.com/deployment/server-workers/)
+- [NGINX Rate Limiting](https://blog.nginx.org/blog/rate-limiting-nginx)
+- Tanenbaum & Van Steen — *Sistemas Distribuídos: Princípios e Paradigmas*
+
+---
 
 > ✅ **Branch `multicamadas`:** o monolito foi refatorado em camadas. Veja **[MUDANCAS.md](MUDANCAS.md)** para o que foi feito e como executar (`uv sync` e `uv run uvicorn app.main:app --reload`).
 
