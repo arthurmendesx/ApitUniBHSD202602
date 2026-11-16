@@ -1,8 +1,9 @@
 """Camada de infraestrutura: conexão e criação das tabelas do SQLite."""
+import os
 import sqlite3
 from collections.abc import Iterator
 
-DB_PATH = "banco_a3.db"
+DB_PATH = os.getenv("DB_PATH", "banco_a3.db")
 
 
 def conectar_banco() -> sqlite3.Connection:
