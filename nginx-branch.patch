@@ -1,0 +1,319 @@
+From 7523107dad2e2c3dbcd19494572e6457742dc0d1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 16 Nov 2026 09:28:31 -0300
+Subject: [PATCH] Adiciona Nginx como proxy reverso e tutorial no README
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011ctCfAznLzxHKYLQgwDjBf
+---
+ .dockerignore          |   5 ++
+ Dockerfile             |  13 +++++
+ README.md              | 106 ++++++++++++++++++++++++++++++++++++++++-
+ app/core/database.py   |   3 +-
+ docker-compose.yml     |  23 +++++++++
+ nginx/nginx.conf       |  47 ++++++++++++++++++
+ nginx/nginx.local.conf |  47 ++++++++++++++++++
+ 7 files changed, 242 insertions(+), 2 deletions(-)
+ create mode 100644 .dockerignore
+ create mode 100644 Dockerfile
+ create mode 100644 docker-compose.yml
+ create mode 100644 nginx/nginx.conf
+ create mode 100644 nginx/nginx.local.conf
+
+diff --git a/.dockerignore b/.dockerignore
+new file mode 100644
+index 0000000..9e4ecde
+--- /dev/null
++++ b/.dockerignore
+@@ -0,0 +1,5 @@
++.venv
++__pycache__
++*.db
++.git
++.idea
+diff --git a/Dockerfile b/Dockerfile
+new file mode 100644
+index 0000000..cee1ef4
+--- /dev/null
++++ b/Dockerfile
+@@ -0,0 +1,13 @@
++FROM python:3.12-slim
++
++COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /bin/uv
++
++WORKDIR /app
++COPY pyproject.toml uv.lock ./
++RUN uv sync --frozen --no-dev
++
++COPY app ./app
++RUN mkdir -p /app/data
++
++# --proxy-headers: confia nos X-Forwarded-* enviados pelo Nginx
++CMD ["uv", "run", "--no-sync", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+diff --git a/README.md b/README.md
+index d050ecd..84bf7dd 100644
+--- a/README.md
++++ b/README.md
+@@ -1,4 +1,108 @@
+-# Template de API RESTful (FastAPI + SQLite) - Multicamadas (Projeto A4)
++# Template de API RESTful (FastAPI + SQLite) - Multicamadas + Nginx (Projeto A4)
++
++> 🔀 **Branch `nginx`:** continuação da branch `multicamadas`. Aqui a API passa a ficar **atrás de um proxy reverso Nginx**. O mini tutorial está logo abaixo.
++
++**Integrantes:** _(preencher com o nome de todos os componentes)_
++
++## 🧭 Mini tutorial: Nginx como proxy reverso da API
++
++### Arquitetura
++
++```
++Cliente ──► Nginx :8080 ──► Uvicorn/FastAPI :8000 (interno) ──► SQLite
++           (rate limit,         (rotas → serviço → repositório)
++            headers, logs)
++```
++
++O cliente **nunca** acessa o Uvicorn diretamente: a porta 8000 só existe na rede interna; o único ponto de entrada é o Nginx.
++
++### Arquivos adicionados nesta branch
++
++| Arquivo | Função |
++|---|---|
++| `nginx/nginx.conf` | Configuração do proxy reverso (usada no Docker) |
++| `nginx/nginx.local.conf` | Mesma configuração apontando para `127.0.0.1:8000` (sem Docker) |
++| `Dockerfile` | Imagem da API (Python 3.12 + uv + Uvicorn com `--proxy-headers`) |
++| `docker-compose.yml` | Sobe os serviços `api` (interno) e `nginx` (porta 8080) |
++| `app/core/database.py` | Caminho do banco agora vem da variável `DB_PATH` (volume no Docker) |
++
++### O que a configuração do Nginx faz
++
++```nginx
++limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;  # rate limiting por IP
++limit_req_status 429;
++
++upstream api_backend { server api:8000; }   # mais instâncias aqui = load balancing
++
++server {
++    listen 80;
++    server_tokens off;          # esconde a versão do Nginx
++    client_max_body_size 1m;    # bloqueia corpos gigantes
++
++    location / {
++        limit_req zone=api_limit burst=20 nodelay;
++        proxy_pass http://api_backend;
++        proxy_set_header Host              $host;
++        proxy_set_header X-Real-IP         $remote_addr;
++        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
++        proxy_set_header X-Forwarded-Proto $scheme;
++    }
++}
++```
++
++- **Ocultação/isolamento:** `proxy_pass` encaminha tudo para o Uvicorn interno.
++- **Segurança:** rate limiting (10 req/s por IP, rajada de 20; excedentes recebem `429`), limite de corpo, versão oculta e headers `X-Content-Type-Options`, `X-Frame-Options` e `Referrer-Policy`.
++- **Cabeçalhos `X-Forwarded-*`:** o Uvicorn roda com `--proxy-headers`, então a API enxerga o IP e o protocolo reais do cliente (doc do FastAPI *Behind a Proxy*).
++
++### Opção A — Docker Compose (recomendado)
++
++```bash
++docker compose up -d --build
++```
++
++- API via Nginx: http://localhost:8080/registros
++- Swagger: http://localhost:8080/docs
++- Health do Nginx: http://localhost:8080/nginx-health
++- `http://localhost:8000` **não responde** — a API não é exposta ao host.
++
++Para parar: `docker compose down`.
++
++### Opção B — Sem Docker (Nginx instalado na máquina)
++
++1. Instale o Nginx (`sudo apt install nginx` no Ubuntu/WSL, `brew install nginx` no macOS).
++2. Suba a API só na interface local:
++   ```bash
++   uv sync
++   uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers
++   ```
++3. Copie a configuração e recarregue o Nginx:
++   ```bash
++   sudo cp nginx/nginx.local.conf /etc/nginx/conf.d/api.conf
++   sudo nginx -t && sudo nginx -s reload   # ou: sudo systemctl reload nginx
++   ```
++4. Acesse http://localhost:8080/docs.
++
++### Testando
++
++```bash
++# CRUD passando pelo Nginx
++curl -X POST http://localhost:8080/registros -H "Content-Type: application/json" -d '{"titulo":"teste"}'
++curl -i http://localhost:8080/registros      # repare em "Server: nginx" e X-Frame-Options
++
++# Rate limiting: 40 requisições seguidas
++for i in $(seq 1 40); do curl -s -o /dev/null -w "%{http_code} " http://localhost:8080/registros; done
++```
++
++Resultado esperado: ~21 respostas `200` e o restante `429 Too Many Requests`.
++
++### Referências
++
++- [NGINX Reverse Proxy Guide](https://docs.nginx.com/nginx/admin-guide/web-server/reverse-proxy/)
++- [FastAPI – Behind a Proxy](https://fastapi.tiangolo.com/advanced/behind-a-proxy/) / [Server Workers](https://fastapi.tiangolo.com/deployment/server-workers/)
++- [NGINX Rate Limiting](https://blog.nginx.org/blog/rate-limiting-nginx)
++- Tanenbaum & Van Steen — *Sistemas Distribuídos: Princípios e Paradigmas*
++
++---
+ 
+ > ✅ **Branch `multicamadas`:** o monolito foi refatorado em camadas. Veja **[MUDANCAS.md](MUDANCAS.md)** para o que foi feito e como executar (`uv sync` e `uv run uvicorn app.main:app --reload`).
+ 
+diff --git a/app/core/database.py b/app/core/database.py
+index 0f0fee3..cdc70cd 100644
+--- a/app/core/database.py
++++ b/app/core/database.py
+@@ -1,8 +1,9 @@
+ """Camada de infraestrutura: conexão e criação das tabelas do SQLite."""
++import os
+ import sqlite3
+ from collections.abc import Iterator
+ 
+-DB_PATH = "banco_a3.db"
++DB_PATH = os.getenv("DB_PATH", "banco_a3.db")
+ 
+ 
+ def conectar_banco() -> sqlite3.Connection:
+diff --git a/docker-compose.yml b/docker-compose.yml
+new file mode 100644
+index 0000000..6c50976
+--- /dev/null
++++ b/docker-compose.yml
+@@ -0,0 +1,23 @@
++services:
++  api:
++    build: .
++    expose:
++      - "8000"          # visível só na rede interna, NÃO publicado no host
++    volumes:
++      - dados:/app/data
++    environment:
++      - DB_PATH=/app/data/banco_a3.db
++    restart: unless-stopped
++
++  nginx:
++    image: nginx:1.27-alpine
++    ports:
++      - "8080:80"       # único ponto de entrada externo
++    volumes:
++      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
++    depends_on:
++      - api
++    restart: unless-stopped
++
++volumes:
++  dados:
+diff --git a/nginx/nginx.conf b/nginx/nginx.conf
+new file mode 100644
+index 0000000..d9aa11b
+--- /dev/null
++++ b/nginx/nginx.conf
+@@ -0,0 +1,47 @@
++# Nginx como proxy reverso na frente da API FastAPI/Uvicorn
++
++# Rate limiting: 10 req/s por IP, com zona de 10 MB para guardar os IPs
++limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
++limit_req_status 429;
++
++upstream api_backend {
++    # "api" é o nome do serviço no docker-compose (porta interna do Uvicorn)
++    server api:8000;
++    # Para balancear carga, basta adicionar mais instâncias:
++    # server api2:8000;
++}
++
++server {
++    listen 80;
++    server_name _;
++
++    server_tokens off;            # esconde a versão do Nginx
++    client_max_body_size 1m;      # limita o tamanho do corpo da requisição
++
++    # Cabeçalhos de segurança
++    add_header X-Content-Type-Options nosniff always;
++    add_header X-Frame-Options DENY always;
++    add_header Referrer-Policy no-referrer always;
++
++    location / {
++        limit_req zone=api_limit burst=20 nodelay;
++
++        proxy_pass http://api_backend;
++        proxy_http_version 1.1;
++
++        # Repassa ao Uvicorn os dados reais do cliente
++        proxy_set_header Host              $host;
++        proxy_set_header X-Real-IP         $remote_addr;
++        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
++        proxy_set_header X-Forwarded-Proto $scheme;
++
++        proxy_connect_timeout 5s;
++        proxy_read_timeout    30s;
++    }
++
++    # Healthcheck do próprio Nginx
++    location = /nginx-health {
++        access_log off;
++        return 200 "ok\n";
++    }
++}
+diff --git a/nginx/nginx.local.conf b/nginx/nginx.local.conf
+new file mode 100644
+index 0000000..78778fd
+--- /dev/null
++++ b/nginx/nginx.local.conf
+@@ -0,0 +1,47 @@
++# Nginx como proxy reverso na frente da API FastAPI/Uvicorn
++
++# Rate limiting: 10 req/s por IP, com zona de 10 MB para guardar os IPs
++limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
++limit_req_status 429;
++
++upstream api_backend {
++    # Uvicorn rodando localmente (sem Docker)
++    server 127.0.0.1:8000;
++    # Para balancear carga, basta adicionar mais instâncias:
++    # server api2:8000;
++}
++
++server {
++    listen 8080;
++    server_name _;
++
++    server_tokens off;            # esconde a versão do Nginx
++    client_max_body_size 1m;      # limita o tamanho do corpo da requisição
++
++    # Cabeçalhos de segurança
++    add_header X-Content-Type-Options nosniff always;
++    add_header X-Frame-Options DENY always;
++    add_header Referrer-Policy no-referrer always;
++
++    location / {
++        limit_req zone=api_limit burst=20 nodelay;
++
++        proxy_pass http://api_backend;
++        proxy_http_version 1.1;
++
++        # Repassa ao Uvicorn os dados reais do cliente
++        proxy_set_header Host              $host;
++        proxy_set_header X-Real-IP         $remote_addr;
++        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
++        proxy_set_header X-Forwarded-Proto $scheme;
++
++        proxy_connect_timeout 5s;
++        proxy_read_timeout    30s;
++    }
++
++    # Healthcheck do próprio Nginx
++    location = /nginx-health {
++        access_log off;
++        return 200 "ok\n";
++    }
++}
+-- 
+2.43.0
+
